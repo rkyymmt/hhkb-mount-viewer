@@ -35,7 +35,29 @@
   #btnUiShow:hover { opacity: 1; }
   body.ui-hidden .panel { display: none !important; }
   body.ui-hidden #btnUiShow { display: block; }
-  @media (max-width: 640px) { #hint { display: none; } .val { min-width: 70px; } }
+  #annot { right: 14px; top: 58px; width: 276px; padding: 10px 12px 11px; box-sizing: border-box;
+    max-height: calc(100vh - 230px); overflow-y: auto; }
+  #annot .a-title { font-size: 12px; font-weight: 700; letter-spacing: .08em; margin-bottom: 8px; }
+  #annot .a-title small { color: #9a9aa2; font-weight: 400; letter-spacing: 0; }
+  #btnModeFix.on { background: #c23a2c; border-color: #c23a2c; color: #fff; }
+  #btnModeQ.on { background: #2f5fd0; border-color: #2f5fd0; color: #fff; }
+  #annotHint { font-size: 11px; color: #9a9aa2; margin-top: 7px; line-height: 1.5; }
+  #annotList { list-style: none; margin: 4px 0 0; padding: 0; }
+  #annotList .empty { font-size: 11px; color: #9a9aa2; line-height: 1.5; margin-top: 4px; }
+  .a-item { background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.08); border-radius: 8px;
+    padding: 6px 8px; margin-top: 6px; cursor: pointer; }
+  .a-item.sel { border-color: #ffd23e; }
+  .a-item .a-head { display: flex; align-items: center; gap: 6px; font-size: 11.5px; }
+  .a-badge { flex: none; width: 18px; height: 18px; border-radius: 50%; color: #fff; font-size: 11px; font-weight: 700;
+    display: inline-flex; align-items: center; justify-content: center; }
+  .a-badge.fix { background: #d8402f; } .a-badge.q { background: #2f6fd8; }
+  .a-part { font-weight: 700; word-break: break-all; }
+  .a-meta { color: #9a9aa2; font-size: 10.5px; margin-left: auto; white-space: nowrap; }
+  .a-del { flex: none; padding: 2px 7px; font-size: 11px; }
+  .a-item input { width: 100%; box-sizing: border-box; margin-top: 5px; background: #17171c; color: #e8e8ea;
+    border: 1px solid rgba(255,255,255,.16); border-radius: 6px; padding: 5px 7px; font-size: 12px; }
+  #copyMsg { font-size: 11px; color: #8fd18a; }
+  @media (max-width: 640px) { #hint { display: none; } .val { min-width: 70px; } #annot { width: 228px; top: 52px; } }
 </style>
 <script type="importmap">
 { "imports": {
@@ -79,6 +101,20 @@
     <button id="btnKb">HHKBを隠す</button>
     <div class="sep"></div>
     <button id="btnUiHide">UIを隠す</button>
+  </div>
+</div>
+<div class="panel" id="annot">
+  <div class="a-title">指示 <small>― 修正・質問箇所をモデル上で指定</small></div>
+  <div class="row">
+    <button id="btnModeFix"><span style="color:#ff7a6b">●</span> 修正を指示</button>
+    <button id="btnModeQ"><span style="color:#7db1ff">●</span> 質問を指示</button>
+  </div>
+  <div id="annotHint">モードを選ぶと、モデル上をクリックしてマーカーを置けます（ドラッグでの回転はそのまま使えます）。もう一度押すか Esc で解除。</div>
+  <ul id="annotList"></ul>
+  <div class="row" style="margin-top:9px">
+    <button id="btnCopy">指示をコピー</button>
+    <button id="btnClear">すべて消去</button>
+    <span id="copyMsg"></span>
   </div>
 </div>
 <button id="btnUiShow">UIを表示</button>
@@ -369,6 +405,216 @@ btnUiHide.addEventListener('click', () => document.body.classList.add('ui-hidden
 btnUiShow.addEventListener('click', () => document.body.classList.remove('ui-hidden'));
 document.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => goView(b.dataset.view)));
 
+// ---------- 指示（注釈）マーカー ----------
+// マーカーはクリックした部品メッシュの子オブジェクト（anchor）にローカル座標で
+// 保持し、表示物（球＋番号バッジ）は毎フレーム anchor のワールド位置へ追従させる。
+// これにより開閉・分解で部品と一緒に動き、鏡像部品でもバッジが反転しない。
+const TYPE_DEF = {
+  fix: { label: '修正', color: 0xe2483a, css: '#d8402f' },
+  question: { label: '質問', color: 0x3a7de2, css: '#2f6fd8' }
+};
+function partNameOf(entry) {
+  const g = entry.geo, side = entry.kind.side || 0;
+  const suf = side === 1 ? '_R' : side === -1 ? '_L' : '';
+  switch (g) {
+    case 'kb': return 'HHKB本体';
+    case 'wallR': return 'cradle_wall_R';
+    case 'wallL': return 'cradle_wall_L';
+    case 'spacerR': return 'spacer_f2_R';
+    case 'spacerL': return 'spacer_f2_L';
+    case 'earBtn': return 'ear_buttons';
+    case 'earPorts': return 'ear_ports';
+    case 'panel': return 'ディスプレイパネル';
+    case 'screws': return 'screws' + suf;
+    case 'armA': return 'arm_a' + suf;
+    case 'armB': return 'arm_b' + suf;
+    case 'clipSlim': return 'c_clip_slim' + suf;
+    case 'pawl': return 'detent_pawl' + suf;
+    default: {
+      const m = g.match(/^clipW(F\d)([RL])$/);
+      if (m) return 'c_clip_wall_' + m[1] + '_' + m[2];
+      return g + suf;
+    }
+  }
+}
+function formatInstructions(list) {
+  const lines = ['HHKBマウント v65 への指示（' + list.length + '件）'];
+  for (const m of list) {
+    const p = m.pos.map(v => v.toFixed(1));
+    lines.push(m.id + '. [' + TYPE_DEF[m.type].label + '] 部品: ' + m.part +
+      ' / 開閉' + m.pct + '%時点 / 座標 (' + p[0] + ', ' + p[1] + ', ' + p[2] + ') mm / コメント: ' +
+      (m.comment ? m.comment : '（未記入）'));
+  }
+  return lines.join('\n');
+}
+const markers = [];
+let markerSeq = 0, annotMode = null, selectedId = 0;
+const annotScene = new THREE.Group();
+scene.add(annotScene);
+const annotList = document.getElementById('annotList');
+const copyMsg = document.getElementById('copyMsg');
+const _mv = new THREE.Vector3();
+function makeBadgeSprite(num, type) {
+  const cv = document.createElement('canvas'); cv.width = cv.height = 96;
+  const cx = cv.getContext('2d');
+  cx.beginPath(); cx.arc(48, 48, 41, 0, Math.PI * 2);
+  cx.fillStyle = TYPE_DEF[type].css; cx.fill();
+  cx.lineWidth = 6; cx.strokeStyle = '#ffffff'; cx.stroke();
+  cx.fillStyle = '#ffffff'; cx.font = 'bold 50px sans-serif';
+  cx.textAlign = 'center'; cx.textBaseline = 'middle';
+  cx.fillText(String(num), 48, 51);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: new THREE.CanvasTexture(cv), transparent: true, depthTest: false }));
+  sp.scale.set(11, 11, 1); sp.position.set(0, 6.8, 0); sp.renderOrder = 999;
+  return sp;
+}
+function makeMarkerVisual(rec) {
+  const grp = new THREE.Group();
+  const sphere = new THREE.Mesh(new THREE.SphereGeometry(1.9, 20, 14),
+    new THREE.MeshBasicMaterial({ color: TYPE_DEF[rec.type].color, transparent: true, depthTest: false }));
+  sphere.renderOrder = 998;
+  grp.add(sphere); grp.add(makeBadgeSprite(rec.id, rec.type));
+  annotScene.add(grp);
+  rec.sphere = sphere;
+  return grp;
+}
+function syncMarkerVisuals() {
+  for (const rec of markers) {
+    rec.anchor.getWorldPosition(_mv);
+    rec.visual.position.copy(_mv);
+  }
+}
+function applySelection() {
+  for (const rec of markers) {
+    const on = rec.id === selectedId;
+    rec.visual.scale.setScalar(on ? 1.55 : 1);
+    rec.sphere.material.color.set(on ? 0xffd23e : TYPE_DEF[rec.type].color);
+  }
+  annotList.querySelectorAll('.a-item').forEach(li =>
+    li.classList.toggle('sel', Number(li.dataset.id) === selectedId));
+}
+function renderAnnotList() {
+  annotList.innerHTML = '';
+  if (!markers.length) {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.textContent = 'マーカーはまだありません。';
+    annotList.appendChild(li);
+    return;
+  }
+  for (const rec of markers) {
+    const li = document.createElement('li');
+    li.className = 'a-item'; li.dataset.id = rec.id;
+    const head = document.createElement('div'); head.className = 'a-head';
+    const badge = document.createElement('span');
+    badge.className = 'a-badge ' + (rec.type === 'fix' ? 'fix' : 'q');
+    badge.textContent = rec.id;
+    const part = document.createElement('span'); part.className = 'a-part';
+    part.textContent = '[' + TYPE_DEF[rec.type].label + '] ' + rec.part;
+    const meta = document.createElement('span'); meta.className = 'a-meta';
+    meta.textContent = '開閉' + rec.pct + '%';
+    const del = document.createElement('button'); del.className = 'a-del';
+    del.textContent = '削除'; del.dataset.del = rec.id;
+    head.append(badge, part, meta, del);
+    const input = document.createElement('input');
+    input.type = 'text'; input.placeholder = 'コメントを入力';
+    input.value = rec.comment; input.dataset.cmt = rec.id;
+    li.append(head, input);
+    annotList.appendChild(li);
+  }
+  applySelection();
+}
+function removeMarker(id) {
+  const i = markers.findIndex(m => m.id === id);
+  if (i < 0) return;
+  const rec = markers[i];
+  if (rec.anchor.parent) rec.anchor.parent.remove(rec.anchor);
+  annotScene.remove(rec.visual);
+  rec.sphere.geometry.dispose(); rec.sphere.material.dispose();
+  markers.splice(i, 1);
+  if (selectedId === id) selectedId = 0;
+  renderAnnotList();
+}
+annotList.addEventListener('click', e => {
+  if (e.target.dataset && e.target.dataset.del) { removeMarker(Number(e.target.dataset.del)); return; }
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
+  const li = e.target.closest('.a-item');
+  if (li) { const id = Number(li.dataset.id); selectedId = selectedId === id ? 0 : id; applySelection(); }
+});
+annotList.addEventListener('input', e => {
+  if (!e.target.dataset || !e.target.dataset.cmt) return;
+  const rec = markers.find(m => m.id === Number(e.target.dataset.cmt));
+  if (rec) rec.comment = e.target.value;
+});
+document.getElementById('btnClear').addEventListener('click', () => {
+  while (markers.length) removeMarker(markers[0].id);
+});
+document.getElementById('btnCopy').addEventListener('click', async () => {
+  if (!markers.length) {
+    copyMsg.textContent = 'マーカーがありません';
+    setTimeout(() => { copyMsg.textContent = ''; }, 1800);
+    return;
+  }
+  const text = formatInstructions(markers);
+  let ok = false;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try { await navigator.clipboard.writeText(text); ok = true; } catch (err) { ok = false; }
+  }
+  if (!ok) {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
+    ta.remove();
+  }
+  copyMsg.textContent = ok ? 'コピーしました' : 'コピーできませんでした';
+  setTimeout(() => { copyMsg.textContent = ''; }, 1800);
+});
+const btnModeFix = document.getElementById('btnModeFix'), btnModeQ = document.getElementById('btnModeQ');
+function applyAnnotMode() {
+  btnModeFix.classList.toggle('on', annotMode === 'fix');
+  btnModeQ.classList.toggle('on', annotMode === 'question');
+  renderer.domElement.style.cursor = annotMode ? 'crosshair' : '';
+}
+btnModeFix.addEventListener('click', () => { annotMode = annotMode === 'fix' ? null : 'fix'; applyAnnotMode(); });
+btnModeQ.addEventListener('click', () => { annotMode = annotMode === 'question' ? null : 'question'; applyAnnotMode(); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && annotMode && e.target.tagName !== 'INPUT') { annotMode = null; applyAnnotMode(); }
+});
+const raycaster = new THREE.Raycaster(), ndc = new THREE.Vector2();
+let pDown = null;
+renderer.domElement.addEventListener('pointerdown', e => { pDown = { x: e.clientX, y: e.clientY, t: performance.now() }; });
+renderer.domElement.addEventListener('pointerup', e => {
+  if (!pDown) return;
+  const moved = Math.hypot(e.clientX - pDown.x, e.clientY - pDown.y);
+  const dt = performance.now() - pDown.t; pDown = null;
+  if (!annotMode || moved > 6 || dt > 600) return;   // ドラッグ（回転）と誤認しない
+  placeMarker(e);
+});
+function placeMarker(e) {
+  ndc.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  const targets = meshes.filter(en => en.mesh.visible).map(en => en.mesh);
+  const hits = raycaster.intersectObjects(targets, false);
+  if (!hits.length) return;
+  const hit = hits[0];
+  const entry = meshes.find(en => en.mesh === hit.object);
+  hit.object.updateWorldMatrix(true, false);
+  const anchor = new THREE.Object3D();
+  anchor.position.copy(hit.object.worldToLocal(hit.point.clone()));   // 部品ローカル座標で保持
+  hit.object.add(anchor);
+  root.updateMatrixWorld(true);
+  const dp = root.worldToLocal(hit.point.clone());   // 設計座標系 (mm) での位置
+  const rec = { id: ++markerSeq, type: annotMode, part: partNameOf(entry),
+    pct: Math.round(state.frac * 100), pos: [dp.x, dp.y, dp.z], comment: '', anchor, visual: null, sphere: null };
+  rec.visual = makeMarkerVisual(rec);
+  markers.push(rec);
+  selectedId = rec.id;
+  renderAnnotList();
+  syncMarkerVisuals();
+}
+renderAnnotList();
+
 // ---------- main loop ----------
 const clock = new THREE.Clock();
 const smoother = t => t * t * t * (t * (t * 6 - 15) + 10);
@@ -405,6 +651,7 @@ function tick() {
     if (state.camAnim.t >= 1) state.camAnim = null;
   }
   updatePose(state.frac, state.explode);
+  syncMarkerVisuals();
   controls.update();
   renderer.render(scene, camera);
 }
