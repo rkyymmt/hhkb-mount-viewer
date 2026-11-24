@@ -56,6 +56,28 @@
   .a-del { flex: none; padding: 2px 7px; font-size: 11px; }
   .a-item input { width: 100%; box-sizing: border-box; margin-top: 5px; background: #17171c; color: #e8e8ea;
     border: 1px solid rgba(255,255,255,.16); border-radius: 6px; padding: 5px 7px; font-size: 12px; }
+  .a-feat { font-size: 11px; color: #ffd23e; margin-top: 4px; }
+  .a-feat:empty { display: none; }
+  .a-steps { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 5px; align-items: center; }
+  .a-axw { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; color: #9a9aa2; }
+  .a-ax { font-weight: 700; color: #c9c9cf; }
+  .a-step { padding: 1px 7px; font-size: 12px; line-height: 1.5; }
+  .a-val { min-width: 38px; text-align: right; color: #e8e8ea; font-size: 11.5px; }
+  #annot select { background: #232329; color: #e8e8ea; border: 1px solid rgba(255,255,255,.14); border-radius: 8px;
+    font-size: 12px; padding: 6px 8px; cursor: pointer; flex: 1; min-width: 104px; }
+  #crosshair { position: fixed; left: 50%; top: 50%; width: 36px; height: 36px; margin: -18px 0 0 -18px;
+    display: none; pointer-events: none; z-index: 40; }
+  #crosshair::before, #crosshair::after { content: ''; position: absolute; background: rgba(255,210,62,.85); }
+  #crosshair::before { left: 50%; top: 0; width: 2px; height: 100%; margin-left: -1px; }
+  #crosshair::after { top: 50%; left: 0; height: 2px; width: 100%; margin-top: -1px; }
+  #crosshair span { position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px;
+    border-radius: 50%; background: #ffd23e; }
+  #candPop { position: fixed; z-index: 70; display: none; width: 216px; background: rgba(18,18,22,.96);
+    border: 1px solid rgba(255,255,255,.2); border-radius: 10px; padding: 8px; box-sizing: border-box;
+    box-shadow: 0 8px 28px rgba(0,0,0,.5); }
+  #candPop .cp-head { font-size: 11px; color: #9a9aa2; line-height: 1.5; margin-bottom: 2px; }
+  #candPop button { display: block; width: 100%; text-align: left; margin-top: 5px; }
+  #candPop .cp-cancel { color: #9a9aa2; }
   #copyMsg { font-size: 11px; color: #8fd18a; }
   @media (max-width: 640px) { #hint { display: none; } .val { min-width: 70px; } #annot { width: 228px; top: 52px; } }
 </style>
@@ -109,7 +131,26 @@
     <button id="btnModeFix"><span style="color:#ff7a6b">●</span> 修正を指示</button>
     <button id="btnModeQ"><span style="color:#7db1ff">●</span> 質問を指示</button>
   </div>
-  <div id="annotHint">モードを選ぶと、モデル上をクリックしてマーカーを置けます（ドラッグでの回転はそのまま使えます）。もう一度押すか Esc で解除。</div>
+  <div class="row" style="margin-top:8px">
+    <div class="lbl">対象</div>
+    <select id="partFilter">
+      <option value="all">すべての部品</option>
+      <option value="ear">耳</option>
+      <option value="pawl">爪（デテント）</option>
+      <option value="armA">アームA</option>
+      <option value="armB">アームB</option>
+      <option value="wall">壁</option>
+      <option value="panel">パネル</option>
+      <option value="clip">クリップ</option>
+      <option value="screws">ビス</option>
+      <option value="spacer">スペーサー</option>
+      <option value="kb">HHKB本体</option>
+    </select>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button id="btnCenterPin">中心にピンを置く</button>
+  </div>
+  <div id="annotHint">モードを選ぶと、モデル上をクリックしてマーカーを置けます（ドラッグでの回転はそのまま使えます）。部品が重なっている場所では候補リストから置く面を選べます。穴・ビス・窓の近くでは特徴点に吸着します。「対象」で部品を絞ると他は薄く表示され、その部品だけを狙えます。もう一度押すか Esc で解除。</div>
   <ul id="annotList"></ul>
   <div class="row" style="margin-top:9px">
     <button id="btnCopy">指示をコピー</button>
@@ -117,6 +158,8 @@
     <span id="copyMsg"></span>
   </div>
 </div>
+<div id="crosshair"><span></span></div>
+<div id="candPop"></div>
 <button id="btnUiShow">UIを表示</button>
 <div id="err"><div>3D表示を開始できませんでした。<br>インターネット接続（Three.jsライブラリの読み込み）が必要です。</div></div>
 
@@ -382,15 +425,28 @@ let ghost = false;
 btnGhost.addEventListener('click', () => {
   ghost = !ghost;
   btnGhost.classList.toggle('on', ghost);
-  for (const { mesh } of meshes) {
-    const mat = mesh.material;
-    mat.transparent = ghost;
-    mat.opacity = ghost ? 0.35 : 1.0;
-    mat.depthWrite = !ghost;
-    mat.side = ghost ? THREE.DoubleSide : THREE.FrontSide;
+  applyMaterialState();
+});
+// 半透明（ゴースト）と部品単独狙いの薄表示を一元管理する。
+// 部品フィルタ有効時、対象外の部品は不透明度 0.08 で薄く表示する。
+function applyMaterialState() {
+  for (const en of meshes) {
+    const mat = en.mesh.material;
+    const faint = partFilter !== 'all' &&
+      !(PART_GROUPS[partFilter] || []).includes(en.geo);
+    if (faint) {
+      mat.transparent = true; mat.opacity = 0.08; mat.depthWrite = false;
+      mat.side = THREE.DoubleSide;
+    } else if (ghost) {
+      mat.transparent = true; mat.opacity = 0.35; mat.depthWrite = false;
+      mat.side = THREE.DoubleSide;
+    } else {
+      mat.transparent = false; mat.opacity = 1.0; mat.depthWrite = true;
+      mat.side = THREE.FrontSide;
+    }
     mat.needsUpdate = true;
   }
-});
+}
 const btnExplode = document.getElementById('btnExplode');
 function syncExplodeBtn() {
   btnExplode.textContent = state.explode > 0.5 ? '組立' : '分解';
@@ -437,12 +493,81 @@ function partNameOf(entry) {
     }
   }
 }
+// ---- 特徴スナップ（設計定数。S1/S2・窓中心・閉ストッパーピンは build65_params.npz 由来） ----
+// 特徴は部品ローカル座標の平面 (plane: 'xy' または 'xz') 上の2点で定義し、
+// クリック点の平面距離が SNAP_R 以内なら特徴点へ吸着する（残りの軸はクリック値のまま）。
+const SNAP_R = 4.0;
+function buildFeatures() {
+  const vc = u => -26.4 + 0.0147 * u;
+  const earCommon = [
+    ['C1穴', K.c1[0], K.c1[1]], ['C2穴', K.c2[0], K.c2[1]],
+    ['S1ビス', 10.7, vc(10.7)], ['S2ビス', 118.7, vc(118.7)]];
+  const wallFeats = [
+    ['F1ピン', K.F1[0], K.F1[1]], ['F2ピン', K.F2[0], K.F2[1]],
+    ['閉ストッパーピン', 73.49, 16.43]];
+  return {
+    earBtn: { plane: 'xy', feats: [...earCommon, ['ボタン窓中心', 49.7, -23.87]] },
+    earPorts: { plane: 'xy', feats: [...earCommon,
+      ['HDMI窓中心', 37.3, -24.25], ['USB-C窓1中心', 59.55, -23.92], ['USB-C窓2中心', 76.9, -23.67]] },
+    screws: { plane: 'xy', feats: [['S1ビス', 10.7, vc(10.7)], ['S2ビス', 118.7, vc(118.7)]] },
+    clipSlim: { plane: 'xy', feats: [['C2穴', K.c2[0], K.c2[1]]] },
+    armA: { plane: 'xy', feats: [['F1穴', 0, 0], ['C1穴', K.A, 0]] },
+    armB: { plane: 'xy', feats: [['F2穴', 0, 0], ['C2穴', K.B, 0]] },
+    pawl: { plane: 'xy', feats: [['C1穴', K.A, 0]] },
+    wallR: { plane: 'xz', feats: wallFeats },
+    wallL: { plane: 'xz', feats: wallFeats },
+    spacerR: { plane: 'xz', feats: [['F2ピン', K.F2[0], K.F2[1]]] },
+    spacerL: { plane: 'xz', feats: [['F2ピン', K.F2[0], K.F2[1]]] },
+    clipWF1R: { plane: 'xz', feats: [['F1ピン', K.F1[0], K.F1[1]]] },
+    clipWF1L: { plane: 'xz', feats: [['F1ピン', K.F1[0], K.F1[1]]] },
+    clipWF2R: { plane: 'xz', feats: [['F2ピン', K.F2[0], K.F2[1]]] },
+    clipWF2L: { plane: 'xz', feats: [['F2ピン', K.F2[0], K.F2[1]]] }
+  };
+}
+const FEATURES = buildFeatures();
+function planeCoords(def, local) {
+  return def.plane === 'xy' ? [local.x, local.y] : [local.x, local.z];
+}
+function snapFeature(entry, local) {
+  const def = FEATURES[entry.geo];
+  if (!def) return null;
+  const [a, b] = planeCoords(def, local);
+  let best = null, bestD = SNAP_R;
+  for (const f of def.feats) {
+    const d = Math.hypot(a - f[1], b - f[2]);
+    if (d <= bestD) { bestD = d; best = f; }
+  }
+  if (!best) return null;
+  if (def.plane === 'xy') { local.x = best[1]; local.y = best[2]; }
+  else { local.x = best[1]; local.z = best[2]; }
+  return best[0];
+}
+// ---- 部品単独狙い（対象部品以外は薄く表示し、レイキャスト対象から外す） ----
+const PART_GROUPS = {
+  ear: ['earBtn', 'earPorts'],
+  pawl: ['pawl'],
+  armA: ['armA'],
+  armB: ['armB'],
+  wall: ['wallR', 'wallL'],
+  panel: ['panel'],
+  clip: ['clipSlim', 'clipWF1R', 'clipWF1L', 'clipWF2R', 'clipWF2L'],
+  screws: ['screws'],
+  spacer: ['spacerR', 'spacerL'],
+  kb: ['kb']
+};
+let partFilter = 'all';
+function raycastTargets() {
+  return meshes.filter(en => en.mesh.visible &&
+    (partFilter === 'all' || (PART_GROUPS[partFilter] || []).includes(en.geo)));
+}
 function formatInstructions(list) {
   const lines = ['HHKBマウント v65 への指示（' + list.length + '件）'];
   for (const m of list) {
-    const p = m.pos.map(v => v.toFixed(1));
+    const p = [m.local.x, m.local.y, m.local.z].map(v => v.toFixed(1));
     lines.push(m.id + '. [' + TYPE_DEF[m.type].label + '] 部品: ' + m.part +
-      ' / 開閉' + m.pct + '%時点 / 座標 (' + p[0] + ', ' + p[1] + ', ' + p[2] + ') mm / コメント: ' +
+      (m.feature ? ' / 特徴: ' + m.feature : '') +
+      ' / ローカル座標 (' + p[0] + ', ' + p[1] + ', ' + p[2] + ') mm' +
+      ' / 開閉' + m.pct + '%時点 / コメント: ' +
       (m.comment ? m.comment : '（未記入）'));
   }
   return lines.join('\n');
@@ -516,13 +641,53 @@ function renderAnnotList() {
     const del = document.createElement('button'); del.className = 'a-del';
     del.textContent = '削除'; del.dataset.del = rec.id;
     head.append(badge, part, meta, del);
+    const feat = document.createElement('div'); feat.className = 'a-feat';
+    feat.textContent = rec.feature ? '特徴: ' + rec.feature : '';
+    const steps = document.createElement('div'); steps.className = 'a-steps';
+    for (const [ax, lab] of [['x', 'u'], ['y', 'v'], ['z', 'z']]) {
+      const wrap = document.createElement('span'); wrap.className = 'a-axw';
+      const labEl = document.createElement('span'); labEl.className = 'a-ax';
+      labEl.textContent = lab;
+      const minus = document.createElement('button'); minus.className = 'a-step';
+      minus.textContent = '−'; minus.dataset.step = ax + ':-0.5'; minus.dataset.mid = rec.id;
+      const val = document.createElement('span'); val.className = 'a-val';
+      val.dataset.val = ax; val.textContent = rec.local[ax].toFixed(1);
+      const plus = document.createElement('button'); plus.className = 'a-step';
+      plus.textContent = '＋'; plus.dataset.step = ax + ':0.5'; plus.dataset.mid = rec.id;
+      wrap.append(labEl, minus, val, plus);
+      steps.appendChild(wrap);
+    }
     const input = document.createElement('input');
     input.type = 'text'; input.placeholder = 'コメントを入力';
     input.value = rec.comment; input.dataset.cmt = rec.id;
-    li.append(head, input);
+    li.append(head, feat, steps, input);
     annotList.appendChild(li);
   }
   applySelection();
+}
+// マーカーを部品ローカル軸方向へ ±0.5mm 動かす。特徴点から外れたら特徴名は外す。
+function stepMarker(rec, ax, delta) {
+  rec.local[ax] = Math.round((rec.local[ax] + delta) * 10) / 10;
+  rec.anchor.position.set(rec.local.x, rec.local.y, rec.local.z);
+  if (rec.feature) {
+    const def = FEATURES[rec.entry.geo];
+    const f = def && def.feats.find(ft => ft[0] === rec.feature);
+    if (f) {
+      const [a, b] = planeCoords(def, rec.local);
+      if (Math.hypot(a - f[1], b - f[2]) > 1e-9) rec.feature = null;
+    }
+  }
+  refreshItemDisplay(rec);
+  syncMarkerVisuals();
+}
+function refreshItemDisplay(rec) {
+  const li = annotList.querySelector('.a-item[data-id="' + rec.id + '"]');
+  if (!li) return;
+  li.querySelectorAll('[data-val]').forEach(sp => {
+    sp.textContent = rec.local[sp.dataset.val].toFixed(1);
+  });
+  const feat = li.querySelector('.a-feat');
+  if (feat) feat.textContent = rec.feature ? '特徴: ' + rec.feature : '';
 }
 function removeMarker(id) {
   const i = markers.findIndex(m => m.id === id);
@@ -536,6 +701,14 @@ function removeMarker(id) {
   renderAnnotList();
 }
 annotList.addEventListener('click', e => {
+  if (e.target.dataset && e.target.dataset.step) {
+    const rec = markers.find(m => m.id === Number(e.target.dataset.mid));
+    if (rec) {
+      const [ax, ds] = e.target.dataset.step.split(':');
+      stepMarker(rec, ax, parseFloat(ds));
+    }
+    return;
+  }
   if (e.target.dataset && e.target.dataset.del) { removeMarker(Number(e.target.dataset.del)); return; }
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
   const li = e.target.closest('.a-item');
@@ -546,6 +719,12 @@ annotList.addEventListener('input', e => {
   const rec = markers.find(m => m.id === Number(e.target.dataset.cmt));
   if (rec) rec.comment = e.target.value;
 });
+let msgTimer = null;
+function flashMsg(t) {
+  copyMsg.textContent = t;
+  clearTimeout(msgTimer);
+  msgTimer = setTimeout(() => { copyMsg.textContent = ''; }, 2200);
+}
 document.getElementById('btnClear').addEventListener('click', () => {
   while (markers.length) removeMarker(markers[0].id);
 });
@@ -571,48 +750,103 @@ document.getElementById('btnCopy').addEventListener('click', async () => {
   setTimeout(() => { copyMsg.textContent = ''; }, 1800);
 });
 const btnModeFix = document.getElementById('btnModeFix'), btnModeQ = document.getElementById('btnModeQ');
+const crosshair = document.getElementById('crosshair');
+const candPop = document.getElementById('candPop');
 function applyAnnotMode() {
   btnModeFix.classList.toggle('on', annotMode === 'fix');
   btnModeQ.classList.toggle('on', annotMode === 'question');
   renderer.domElement.style.cursor = annotMode ? 'crosshair' : '';
+  crosshair.style.display = annotMode ? 'block' : 'none';
+  if (!annotMode) hideCandPop();
 }
 btnModeFix.addEventListener('click', () => { annotMode = annotMode === 'fix' ? null : 'fix'; applyAnnotMode(); });
 btnModeQ.addEventListener('click', () => { annotMode = annotMode === 'question' ? null : 'question'; applyAnnotMode(); });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && annotMode && e.target.tagName !== 'INPUT') { annotMode = null; applyAnnotMode(); }
+  if (e.key !== 'Escape' || e.target.tagName === 'INPUT') return;
+  if (candPop.style.display === 'block') { hideCandPop(); return; }
+  if (annotMode) { annotMode = null; applyAnnotMode(); }
 });
+document.getElementById('partFilter').addEventListener('change', e => {
+  partFilter = e.target.value;
+  hideCandPop();
+  applyMaterialState();
+});
+// レイ上の全交差を集め、部品ごとに最も手前の命中だけを候補として返す。
+// ローカル座標は候補確定の時点で計算しておく（ポップアップ表示中に姿勢が
+// 変わっても、タップした瞬間の部品上の点がずれないように）。
 const raycaster = new THREE.Raycaster(), ndc = new THREE.Vector2();
-let pDown = null;
-renderer.domElement.addEventListener('pointerdown', e => { pDown = { x: e.clientX, y: e.clientY, t: performance.now() }; });
-renderer.domElement.addEventListener('pointerup', e => {
-  if (!pDown) return;
-  const moved = Math.hypot(e.clientX - pDown.x, e.clientY - pDown.y);
-  const dt = performance.now() - pDown.t; pDown = null;
-  if (!annotMode || moved > 6 || dt > 600) return;   // ドラッグ（回転）と誤認しない
-  placeMarker(e);
-});
-function placeMarker(e) {
-  ndc.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+function collectHits(cx, cy) {
+  ndc.set((cx / innerWidth) * 2 - 1, -(cy / innerHeight) * 2 + 1);
   raycaster.setFromCamera(ndc, camera);
-  const targets = meshes.filter(en => en.mesh.visible).map(en => en.mesh);
-  const hits = raycaster.intersectObjects(targets, false);
-  if (!hits.length) return;
-  const hit = hits[0];
-  const entry = meshes.find(en => en.mesh === hit.object);
-  hit.object.updateWorldMatrix(true, false);
+  const hits = raycaster.intersectObjects(raycastTargets().map(en => en.mesh), false);
+  const seen = new Set(), out = [];
+  for (const h of hits) {
+    if (seen.has(h.object)) continue;
+    seen.add(h.object);
+    const entry = meshes.find(en => en.mesh === h.object);
+    h.object.updateWorldMatrix(true, false);
+    out.push({ entry, local: h.object.worldToLocal(h.point.clone()) });
+  }
+  return out;
+}
+let pendingCands = null;
+function hideCandPop() { candPop.style.display = 'none'; pendingCands = null; }
+function offerHits(cands, px, py) {
+  if (!cands.length) return;
+  if (cands.length === 1) { placeMarkerAt(cands[0]); return; }
+  pendingCands = cands;
+  candPop.innerHTML = '';
+  const head = document.createElement('div'); head.className = 'cp-head';
+  head.textContent = '部品が重なっています。置く面を選んでください（手前から）';
+  candPop.appendChild(head);
+  cands.forEach((c, i) => {
+    const b = document.createElement('button');
+    b.textContent = (i + 1) + '. ' + partNameOf(c.entry);
+    b.addEventListener('click', () => { hideCandPop(); placeMarkerAt(c); });
+    candPop.appendChild(b);
+  });
+  const cancel = document.createElement('button');
+  cancel.className = 'cp-cancel'; cancel.textContent = 'キャンセル';
+  cancel.addEventListener('click', hideCandPop);
+  candPop.appendChild(cancel);
+  candPop.style.display = 'block';
+  const w = 216, h = candPop.offsetHeight || 180;
+  candPop.style.left = Math.max(6, Math.min(px + 12, innerWidth - w - 6)) + 'px';
+  candPop.style.top = Math.max(6, Math.min(py + 12, innerHeight - h - 6)) + 'px';
+}
+function placeMarkerAt(cand) {
+  const local = cand.local.clone();
+  const feature = snapFeature(cand.entry, local);
   const anchor = new THREE.Object3D();
-  anchor.position.copy(hit.object.worldToLocal(hit.point.clone()));   // 部品ローカル座標で保持
-  hit.object.add(anchor);
-  root.updateMatrixWorld(true);
-  const dp = root.worldToLocal(hit.point.clone());   // 設計座標系 (mm) での位置
-  const rec = { id: ++markerSeq, type: annotMode, part: partNameOf(entry),
-    pct: Math.round(state.frac * 100), pos: [dp.x, dp.y, dp.z], comment: '', anchor, visual: null, sphere: null };
+  anchor.position.copy(local);   // 部品ローカル座標で保持（部品に追従）
+  cand.entry.mesh.add(anchor);
+  const rec = { id: ++markerSeq, type: annotMode, part: partNameOf(cand.entry), entry: cand.entry,
+    pct: Math.round(state.frac * 100), local: { x: local.x, y: local.y, z: local.z },
+    feature, comment: '', anchor, visual: null, sphere: null };
   rec.visual = makeMarkerVisual(rec);
   markers.push(rec);
   selectedId = rec.id;
   renderAnnotList();
   syncMarkerVisuals();
 }
+// 中心十字：視点を合わせてから画面中心のレイで配置する（スマホ用）。
+document.getElementById('btnCenterPin').addEventListener('click', () => {
+  if (!annotMode) { flashMsg('まず「修正を指示」か「質問を指示」を選んでください'); return; }
+  const cands = collectHits(innerWidth / 2, innerHeight / 2);
+  if (!cands.length) { flashMsg('画面中心に部品がありません'); return; }
+  offerHits(cands, innerWidth / 2, innerHeight / 2);
+});
+let pDown = null;
+renderer.domElement.addEventListener('pointerdown', e => { pDown = { x: e.clientX, y: e.clientY, t: performance.now() }; });
+renderer.domElement.addEventListener('pointercancel', () => { pDown = null; });
+renderer.domElement.addEventListener('pointerup', e => {
+  if (!pDown) return;
+  const moved = Math.hypot(e.clientX - pDown.x, e.clientY - pDown.y);
+  const dt = performance.now() - pDown.t; pDown = null;
+  if (!annotMode || moved >= 8 || dt >= 500) return;   // ドラッグ（回転）と誤認しない
+  const cands = collectHits(e.clientX, e.clientY);
+  if (cands.length) offerHits(cands, e.clientX, e.clientY);
+});
 renderAnnotList();
 
 // ---------- main loop ----------
